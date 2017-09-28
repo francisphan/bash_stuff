@@ -29,7 +29,7 @@ done
 
 i=0
 while [[ $i -eq 0 ]]; do
-	if [[ -f /etc/vimrc ]]; then
+	if [[ -f ~/.vimrc ]]; then
 		read -p "Do you want to overwrite current vimrc? (y/n) " RESP
 	else
 		RESP="y"
@@ -37,7 +37,7 @@ while [[ $i -eq 0 ]]; do
 
 	RESP=$(echo "$RESP" | tr '[:upper:]' '[:lower:]')
 	if [[ $RESP -eq "y" ]]; then
-		sudo cp $SCRIPT_DIR/profiles/vimrc /etc/vimrc
+		cp $SCRIPT_DIR/profiles/vimrc ~/.vimrc
 		i=1
 	elif [[ $RESP -eq "n" ]]; then
 		i=1

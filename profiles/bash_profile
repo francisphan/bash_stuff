@@ -1,8 +1,6 @@
 alias shrug="echo \"¯\_(ツ)_/¯\"" #The most important alias
 alias ls="ls -G" #List files with color
 alias lsa="ls -FlahG " #List files in extended format with color
-alias vim="vim -u /etc/vimrc" #Overrides default vim to make it use vimrc
-alias vi="vim -u /etc/vimrc" #Overrides default vi to make it use vim with vimrc
 alias grep="grep --color"
 
 #### COLORS ####
