@@ -1,0 +1,135 @@
+"############### vimrc2 - Improved Version ###############
+" Based on original vimrc-RBH with modern enhancements
+
+"========== Basic Settings ==========
+set nocompatible              " Use vim improvements over vi
+set encoding=utf-8            " Default to UTF-8
+set fileformats=unix          " Unix line endings
+set shortmess=a               " Abbreviate messages
+
+"========== Visual Settings ==========
+syntax on                     " Enable syntax highlighting
+set number                    " Show line numbers
+set relativenumber            " Relative line numbers for navigation
+set ruler                     " Show cursor position
+set showcmd                   " Show partial commands
+set showmatch                 " Highlight matching brackets
+set laststatus=2              " Always show status line
+set cursorline                " Highlight current line
+set scrolloff=3               " Keep 3 lines visible above/below cursor
+set sidescrolloff=5           " Keep 5 columns visible when scrolling
+
+"========== Color Scheme ==========
+color delek                   " Color scheme
+hi statusline term=inverse,bold cterm=inverse,bold ctermfg=black ctermbg=darkgreen
+hi statuslinenc term=inverse,bold cterm=inverse,bold ctermfg=darkgreen ctermbg=darkblue
+hi Normal guibg=black guifg=white
+hi Search guibg=white guifg=blue
+hi IncSearch guibg=red guifg=green
+
+"========== Search Settings ==========
+set hls                       " Highlight search results
+set incsearch                 " Incremental search
+set ignorecase                " Case-insensitive search
+set smartcase                 " Override ignorecase if search has uppercase
+
+"========== Indentation & Tabs ==========
+set tabstop=4                 " Tab width
+set shiftwidth=4              " Indent width
+set expandtab                 " Use spaces instead of tabs
+set ai                        " Auto-indent
+set smartindent               " Smart auto-indenting
+filetype plugin indent on     " File type-based indenting
+
+"========== History & Undo ==========
+set history=1000              " Command history
+set undolevels=1000           " More undo history
+set undofile                  " Persistent undo across sessions
+set undodir=~/.vim/undo       " Store undo files (create dir if needed)
+
+"========== Backup Settings ==========
+set nobackup                  " No backup files
+set nowritebackup             " No backup while editing
+set noswapfile                " No swap files
+
+"========== Buffer & Window Settings ==========
+set hidden                    " Allow hidden buffers
+set wmh=0                     " Minimum window height
+set splitbelow                " Open horizontal splits below
+set splitright                " Open vertical splits to right
+
+"========== Command Line ==========
+set wildmenu                  " Visual autocomplete for command menu
+set wildmode=longest:full,full
+set confirm                   " Confirm instead of failing commands
+
+"========== File Handling ==========
+set autoread                  " Auto-reload files changed outside vim
+set backspace=indent,eol,start  " Make backspace work as expected
+
+"========== Security ==========
+set modelines=0               " Disable modelines (security risk)
+
+"========== Behavior ==========
+behave xterm                  " xterm-style behavior
+
+"========== Key Mappings (Non-recursive) ==========
+" Window Navigation
+nnoremap <C-J> <C-W>j<C-W>_
+nnoremap <C-K> <C-W>k<C-W>_
+
+" Quick escape in insert mode
+inoremap ;; <Esc>
+
+" File explorer
+nnoremap // :Explore<CR>
+
+" Toggle line numbers
+nnoremap \ :set nu!<CR>
+
+" Remove trailing whitespace
+nnoremap == :%s/[ \t]*$//g<CR><C-O>
+
+" Toggle paste mode
+nnoremap -- :set paste!<CR>
+
+" Remove Windows carriage returns
+nnoremap cc :%s/\r//g<CR>
+
+"========== Abbreviations for Code Snippets ==========
+" Perl/C-style if statement
+iabbrev rif if ()<CR>{<CR>}<Esc>kf(a
+
+" Perl/C-style else statement
+iabbrev relse else<CR>{<CR>}<Esc>kA
+
+" Perl print statement
+iabbrev rp print "\n";<Esc>F\i
+
+" Bash if statement
+iabbrev bif if [  ]; then<CR>fi<Esc>kf[la
+
+" Bash for loop
+iabbrev bfor for i in ""; do<CR>done<Esc>kf"i
+
+"========== Date/Time Abbreviations ==========
+" Insert date (YYYY-MM-DD)
+iabbrev xdate <C-R>=strftime("%Y-%m-%d")<CR>
+
+" Insert date and time
+iabbrev mdate <C-R>=strftime("%Y-%m-%d %H:%M%p")<CR>
+
+" Insert full date
+iabbrev rdate <C-R>=strftime("%A %Y-%m-%d")<CR>
+
+"========== Auto-commands ==========
+" Create undo directory if it doesn't exist
+if !isdirectory($HOME."/.vim/undo")
+    call mkdir($HOME."/.vim/undo", "p", 0700)
+endif
+
+" Return to last edit position when opening files
+autocmd BufReadPost *
+    \ if line("'\"") > 0 && line("'\"") <= line("$") |
+    \   exe "normal! g`\"" |
+    \ endif
