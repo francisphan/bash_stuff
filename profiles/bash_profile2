@@ -2,6 +2,13 @@
 ############### bash_profile2 - Improved Version ###############
 # Based on original bash_profile with modern enhancements
 
+#========== Source bashrc ==========
+# Source ~/.bashrc first for consistent PATH and environment
+# This file will then override settings like PS1 with custom values
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+
 #========== OS Detection ==========
 case "$(uname -s)" in
     Darwin*)    OS_TYPE="mac";;
@@ -212,24 +219,7 @@ backup() {
 }
 
 #========== PATH Management ==========
-# Add common directories to PATH if they exist
-pathappend() {
-    if [ -d "$1" ] && [[ ":$PATH:" != *":$1:"* ]]; then
-        PATH="${PATH:+"$PATH:"}$1"
-    fi
-}
-
-pathprepend() {
-    if [ -d "$1" ] && [[ ":$PATH:" != *":$1:"* ]]; then
-        PATH="$1${PATH:+":$PATH"}"
-    fi
-}
-
-# Add local bin directories if they exist
-pathprepend "$HOME/.local/bin"
-pathprepend "$HOME/bin"
-
-export PATH
+# PATH management moved to ~/.bashrc for consistency across all shell types
 
 #========== Welcome Message ==========
 # Show system info on login (optional - comment out if not desired)
