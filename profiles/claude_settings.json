@@ -9,7 +9,10 @@
       "Glob",
       "Grep",
       "WebSearch",
-      "WebFetch"
+      "WebFetch",
+      "mcp__salesforce-netsuite__*",
+      "Bash(tmux set-environment*)",
+      "Bash(tmux show-environment*)"
     ]
   },
   "hooks": {
