@@ -234,6 +234,10 @@ tnote() {
     fi
 }
 
+#========== Cursor Style ==========
+# Set cursor to a filled block
+echo -ne '\e[2 q'
+
 #========== PATH Management ==========
 # PATH management moved to ~/.bashrc for consistency across all shell types
 

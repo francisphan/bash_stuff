@@ -4,6 +4,7 @@
 "========== Basic Settings ==========
 set nocompatible              " Use vim improvements over vi
 set encoding=utf-8            " Default to UTF-8
+set clipboard=unnamedplus     " Use system clipboard for yank/paste
 set fileformats=unix          " Unix line endings
 set shortmess=a               " Abbreviate messages
 
@@ -38,7 +39,7 @@ set tabstop=4                 " Tab width
 set shiftwidth=4              " Indent width
 set expandtab                 " Use spaces instead of tabs
 set ai                        " Auto-indent
-set smartindent               " Smart auto-indenting
+" smartindent removed — redundant with filetype indent and fights paste mode
 filetype plugin indent on     " File type-based indenting
 
 "========== History & Undo ==========
@@ -75,13 +76,15 @@ behave xterm                  " xterm-style behavior
 set ttimeoutlen=10            " Fast key code timeout (fixes paste lag)
 set timeoutlen=500            " Mapping timeout (e.g. ;; escape)
 
+"========== Paste Settings ==========
+" With clipboard=unnamedplus, use "+p in normal mode or Ctrl+Shift+V in terminal.
+" Ctrl+V in insert mode = paste from system clipboard without triggering indent/abbrevs
+inoremap <C-v> <C-o>"+p
+
 "========== Key Mappings (Non-recursive) ==========
 " Window Navigation
 nnoremap <C-J> <C-W>j<C-W>_
 nnoremap <C-K> <C-W>k<C-W>_
-
-" Quick escape in insert mode
-inoremap ;; <Esc>
 
 " File explorer
 nnoremap // :Explore<CR>
@@ -93,7 +96,8 @@ nnoremap \ :set nu!<CR>
 nnoremap == :%s/[ \t]*$//g<CR><C-O>
 
 " Toggle paste mode
-nnoremap -- :set paste!<CR>
+nnoremap <F2> :set paste!<CR>
+set pastetoggle=<F2>
 
 " Remove Windows carriage returns
 nnoremap cc :%s/\r//g<CR>
