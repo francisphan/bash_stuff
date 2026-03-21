@@ -77,6 +77,14 @@ set ttimeoutlen=10            " Fast key code timeout (fixes paste lag)
 set timeoutlen=500            " Mapping timeout (e.g. ;; escape)
 
 "========== Paste Settings ==========
+" Bracketed paste: terminal wraps pasted text in escape sequences so vim
+" doesn't interpret it as keystrokes (prevents abbreviations/mappings firing)
+if &term =~ "screen" || &term =~ "tmux"
+    let &t_BE = "\e[?2004h"
+    let &t_BD = "\e[?2004l"
+    exec "set t_PS=\e[200~ t_PE=\e[201~"
+endif
+
 " With clipboard=unnamedplus, use "+p in normal mode or Ctrl+Shift+V in terminal.
 " Ctrl+V in insert mode = paste from system clipboard without triggering indent/abbrevs
 inoremap <C-v> <C-o>"+p
