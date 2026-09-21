@@ -218,6 +218,22 @@ Note: `cd` auto-lists directory contents after changing.
 
 Machine-specific config goes in `~/.bash_profile_local` (auto-sourced, not tracked in git).
 
+### Repo Sync (FPMoss <-> FPZeph)
+
+`bin/repo-sync` keeps the repos in `~/workspace` in sync through GitHub. A systemd user timer runs it 30s after startup and then hourly. It only ever fast-forwards and clones; anything it won't touch (unpushed, diverged, blocked by local edits) is listed at login.
+
+| Command | Action |
+|---------|--------|
+| `repo-sync` | Sync now |
+| `repo-sync status` | Result of the last sync + next scheduled run |
+| `repo-sync log` | Tail `~/.local/state/repo-sync/sync.log` |
+| `repo-sync install` | Install timer + login summary (new machine: `git pull && bin/repo-sync install`) |
+| `repo-sync uninstall` | Remove them |
+
+When the other machine is online over Tailscale it is asked over ssh for its repo state: repos missing here get cloned, and commits it hasn't pushed are flagged. Its last report is cached, so that still works while it is off.
+
+Overrides go in `~/.config/repo-sync/config`, e.g. `REPO_SYNC_IGNORE="loa-logs"` or `REPO_SYNC_AUTO_PUSH=1` (see the header of `bin/repo-sync`).
+
 ---
 
 ## Claude Code

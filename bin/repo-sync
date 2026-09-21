@@ -1,0 +1,426 @@
+#!/bin/bash
+
+############### repo-sync ###############
+# Keeps the git repos under ~/workspace in sync between FPMoss and FPZeph.
+#
+# GitHub is the hub: each machine fetches every repo and fast-forwards whatever
+# is strictly behind. When the other machine is online over Tailscale it is also
+# asked (over ssh) for its repo state, so work stranded there -- unpushed
+# commits, repos that only exist on one side -- gets flagged or cloned.
+#
+# The only changes it ever makes are fast-forwards and clones of missing repos.
+# It never stashes, resets, rebases, force-anythings, or (by default) pushes.
+#
+#   repo-sync [run]        sync now
+#   repo-sync status       show the result of the last sync (--brief: only
+#                          what needs attention, silent when nothing does)
+#   repo-sync log          tail the log
+#   repo-sync install      install the systemd user timer (startup + hourly)
+#   repo-sync uninstall    remove it
+#
+# Optional overrides in ~/.config/repo-sync/config (sourced as bash):
+#   REPO_SYNC_ROOT=~/workspace       directory holding the repos
+#   REPO_SYNC_HOSTS="FPMoss FPZeph"  the machines; the peer is "the other one"
+#   REPO_SYNC_PEER_USER=$USER        ssh user on the peer
+#   REPO_SYNC_IGNORE="foo bar"       repo dir names to leave alone
+#   REPO_SYNC_CLONE_MISSING=1        clone repos the peer has and we don't
+#   REPO_SYNC_AUTO_PUSH=0            1 = also push branches that are only ahead
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/repo-sync/config"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/repo-sync"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+LOCAL_PROFILE="$HOME/.bash_profile_local"
+LOGIN_HOOK='command -v repo-sync >/dev/null && repo-sync status --brief'
+
+# shellcheck disable=SC1090
+[[ -f "$CONFIG_FILE" ]] && . "$CONFIG_FILE"
+
+ROOT="${REPO_SYNC_ROOT:-$HOME/workspace}"
+HOSTS="${REPO_SYNC_HOSTS:-FPMoss FPZeph}"
+PEER_USER="${REPO_SYNC_PEER_USER:-$USER}"
+IGNORE=" ${REPO_SYNC_IGNORE:-} "
+CLONE_MISSING="${REPO_SYNC_CLONE_MISSING:-1}"
+AUTO_PUSH="${REPO_SYNC_AUTO_PUSH:-0}"
+
+SELF="$(hostname)"
+BRANCH_FORMAT='%(refname:short):%(upstream):%(upstream:track,nobracket):%(upstream:remotename):%(upstream:remoteref)'
+
+# Never let git or ssh sit waiting on a prompt nobody will answer
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10"
+
+ATTENTION=()
+INFO=()
+attention() { ATTENTION+=("$1"); }
+info()      { INFO+=("$1"); }
+
+plural() { [[ "$1" == 1 ]] && echo "$1 $2" || echo "$1 $2s"; }
+
+#========== Repo state ==========
+# These two are also shipped to the peer over ssh (via declare -f), so they
+# must stay self-contained: no globals, no helpers.
+
+# Branches holding commits that exist on no remote, as "branch:count,..." or "-"
+repo_unpushed() {
+    local d="$1" out="" br up track n
+    while IFS=: read -r br up track _; do
+        if [[ -z "$up" ]]; then
+            n=$(git -C "$d" rev-list --count "refs/heads/$br" --not --remotes 2>/dev/null) || n=0
+        elif [[ "$track" =~ ahead\ ([0-9]+) ]]; then
+            n="${BASH_REMATCH[1]}"
+        else
+            n=0   # in sync, behind, or upstream gone (pushed once, deleted remotely)
+        fi
+        [[ "$n" -gt 0 ]] && out+="${out:+,}$br:$n"
+    done < <(git -C "$d" for-each-ref --format='%(refname:short):%(upstream):%(upstream:track,nobracket)' refs/heads)
+    echo "${out:--}"
+}
+
+# One TSV line per repo: name, origin url, branch, HEAD, unpushed, dirty count
+emit_state() {
+    local root="$1" d url br head
+    for d in "$root"/*/; do
+        d="${d%/}"
+        [[ -e "$d/.git" ]] || continue
+        url=$(git -C "$d" remote get-url origin 2>/dev/null) || url="-"
+        br=$(git -C "$d" symbolic-ref --short -q HEAD) || br="-"
+        head=$(git -C "$d" rev-parse -q --verify HEAD 2>/dev/null) || head="-"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$url" "$br" "$head" \
+            "$(repo_unpushed "$d")" "$(git -C "$d" status --porcelain 2>/dev/null | wc -l)"
+    done
+}
+
+#========== Local sync ==========
+busy_reason() {
+    local g
+    g=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    if   [[ -d "$g/rebase-merge" || -d "$g/rebase-apply" ]]; then echo "rebase"
+    elif [[ -f "$g/MERGE_HEAD" ]];       then echo "merge"
+    elif [[ -f "$g/CHERRY_PICK_HEAD" ]]; then echo "cherry-pick"
+    elif [[ -f "$g/REVERT_HEAD" ]];      then echo "revert"
+    elif [[ -f "$g/BISECT_LOG" ]];       then echo "bisect"
+    else return 1
+    fi
+}
+
+sync_repo() {
+    local d="$1" name="${1##*/}" cur busy err dirty unpushed diverged="" entries entry
+    local br up track remote remoteref ahead behind
+
+    if ! git -C "$d" remote get-url origin &>/dev/null; then
+        info "$name: no origin remote -- exists only on $SELF"
+        return
+    fi
+
+    if ! err=$(timeout 180 git -C "$d" fetch --prune --quiet origin 2>&1 </dev/null); then
+        attention "$name: fetch failed -- ${err##*$'\n'}"
+        return
+    fi
+
+    cur=$(git -C "$d" symbolic-ref --short -q HEAD) || cur=""
+    busy=$(busy_reason "$d") || busy=""
+
+    while IFS=: read -r br up track remote remoteref; do
+        [[ "$up" == refs/remotes/* ]] || continue
+        ahead=0; behind=0
+        [[ "$track" =~ ahead\ ([0-9]+) ]]  && ahead="${BASH_REMATCH[1]}"
+        [[ "$track" =~ behind\ ([0-9]+) ]] && behind="${BASH_REMATCH[1]}"
+
+        if (( ahead > 0 && behind > 0 )); then
+            diverged+=" $br "
+            attention "$name: $br has diverged from ${up#refs/remotes/} ($ahead ahead, $behind behind) -- needs a manual rebase/merge"
+        elif (( behind > 0 )); then
+            if [[ "$br" == "$cur" ]]; then
+                if [[ -n "$busy" ]]; then
+                    attention "$name: $br is $(plural "$behind" commit) behind but a $busy is in progress -- left alone"
+                elif err=$(git -C "$d" merge --ff-only --quiet "$up" 2>&1 </dev/null); then
+                    info "$name: fast-forwarded $br by $(plural "$behind" commit)"
+                else
+                    attention "$name: $br is $(plural "$behind" commit) behind but local changes block the fast-forward"
+                    echo "    $name: ${err//$'\n'/ | }"
+                fi
+            # Refspec without "+" only ever fast-forwards, and git refuses to
+            # touch a branch that is checked out in any worktree
+            elif git -C "$d" fetch --quiet . "$up:refs/heads/$br" &>/dev/null </dev/null; then
+                info "$name: fast-forwarded $br by $(plural "$behind" commit) (not checked out)"
+            fi
+        elif (( ahead > 0 )) && [[ "$AUTO_PUSH" == 1 && -n "$remote" && -n "$remoteref" ]]; then
+            if err=$(timeout 180 git -C "$d" push --quiet "$remote" "refs/heads/$br:$remoteref" 2>&1 </dev/null); then
+                info "$name: pushed $(plural "$ahead" commit) on $br"
+            else
+                attention "$name: push of $br failed -- ${err##*$'\n'}"
+            fi
+        fi
+    done < <(git -C "$d" for-each-ref --format="$BRANCH_FORMAT" refs/heads)
+
+    [[ -z "$cur" ]] && info "$name: detached HEAD"
+
+    # Diverged branches were already reported above
+    unpushed=""
+    IFS=, read -ra entries <<< "$(repo_unpushed "$d")"
+    for entry in "${entries[@]}"; do
+        [[ "$entry" == "-" || "$diverged" == *" ${entry%:*} "* ]] || unpushed+="${unpushed:+, }$entry"
+    done
+    [[ -n "$unpushed" ]] && attention "$name: unpushed commits ($unpushed) -- $(other_host) can't see them until pushed"
+
+    dirty=$(git -C "$d" status --porcelain 2>/dev/null | wc -l)
+    (( dirty > 0 )) && info "$name: $(plural "$dirty" "uncommitted change")"
+}
+
+#========== Peer (over Tailscale) ==========
+other_host() {
+    local h
+    for h in $HOSTS; do
+        [[ "${h,,}" != "${SELF,,}" ]] && { echo "$h"; return; }
+    done
+    echo "the other machine"
+}
+
+# Prints the peer's tailscale IP if it is online; returns 1 otherwise
+peer_online_ip() {
+    command -v tailscale >/dev/null && command -v jq >/dev/null || return 1
+    local ip
+    ip=$(tailscale status --json 2>/dev/null | jq -r --arg h "${1,,}" \
+        '.Peer[]? | select((.HostName | ascii_downcase) == $h and .Online) | .TailscaleIPs[0]' | head -1)
+    [[ -n "$ip" && "$ip" != null ]] && echo "$ip"
+}
+
+fetch_peer_state() {
+    local ip="$1" remote_root="$ROOT"
+    # Same layout on both machines: ROOT relative to each side's own $HOME
+    [[ "$ROOT" == "$HOME"/* ]] && remote_root="\$HOME/${ROOT#"$HOME"/}"
+    ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
+        "$PEER_USER@$ip" bash -s <<EOF
+$(declare -f repo_unpushed emit_state)
+emit_state "$remote_root"
+EOF
+}
+
+sync_peer() {
+    local peer ip cache fresh=0 seen="" suffix=""
+    local name url br head unpushed dirty err
+    peer=$(other_host)
+    cache="$STATE_DIR/peer-${peer,,}.tsv"
+
+    if ip=$(peer_online_ip "$peer"); then
+        if fetch_peer_state "$ip" > "$cache.tmp" 2>"$STATE_DIR/peer-ssh.err" && [[ -s "$cache.tmp" ]]; then
+            mv "$cache.tmp" "$cache"
+            fresh=1
+            echo "  $peer: online at $ip, state received"
+        else
+            rm -f "$cache.tmp"
+            attention "$peer is online but ssh to $PEER_USER@$ip failed -- $(tail -1 "$STATE_DIR/peer-ssh.err" 2>/dev/null)"
+        fi
+    else
+        echo "  $peer: offline"
+    fi
+
+    if [[ ! -f "$cache" ]]; then
+        info "$peer has not been reached from here yet -- nothing known about its repos"
+        return
+    fi
+    # Offline peers are judged on what they last reported
+    (( fresh )) || suffix=" (as of $(date -r "$cache" '+%b %-d %H:%M'), not reachable since)"
+
+    while IFS=$'\t' read -r name url br head unpushed dirty; do
+        [[ "$IGNORE" == *" $name "* ]] && continue
+        seen+=" $name "
+
+        if [[ ! -e "$ROOT/$name/.git" ]]; then
+            if [[ "$url" == "-" ]]; then
+                info "$name: exists only on $peer, with no origin remote$suffix"
+            elif [[ -e "$ROOT/$name" ]]; then
+                attention "$name: $peer has this repo but $ROOT/$name here is not a git repo"
+            elif [[ "$CLONE_MISSING" != 1 ]]; then
+                info "$name: on $peer but not here ($url)"
+            elif err=$(timeout 900 git clone --quiet "$url" "$ROOT/$name" 2>&1 </dev/null); then
+                info "$name: cloned (was on $peer but not here)"
+            else
+                attention "$name: on $peer but cloning $url failed -- ${err##*$'\n'}"
+            fi
+            continue
+        fi
+
+        if [[ "$unpushed" != "-" ]]; then
+            # A cached report goes stale once the peer pushes: if its HEAD has
+            # since shown up on a remote branch here, the work is no longer stranded
+            if [[ -n "$suffix" && "$head" != "-" ]] \
+                && git -C "$ROOT/$name" branch -r --contains "$head" 2>/dev/null | grep -q .; then
+                :
+            else
+                attention "$name: $peer has unpushed commits ($unpushed)$suffix"
+            fi
+        fi
+        [[ "$dirty" -gt 0 ]] && info "$name: $peer has $(plural "$dirty" "uncommitted change")$suffix"
+    done < "$cache"
+
+    for name in "$ROOT"/*/; do
+        name="${name%/}"; name="${name##*/}"
+        [[ -e "$ROOT/$name/.git" && "$seen" != *" $name "* && "$IGNORE" != *" $name "* ]] || continue
+        git -C "$ROOT/$name" remote get-url origin &>/dev/null || continue
+        info "$name: not on $peer$suffix -- it will clone it on its next sync while $SELF is online"
+    done
+}
+
+#========== Run ==========
+wait_for_network() {
+    local i
+    for ((i = 0; i < 24; i++)); do
+        curl -fsS -o /dev/null --max-time 5 https://github.com 2>/dev/null && return 0
+        sleep 5
+    done
+    return 1
+}
+
+write_status() {
+    local count="$1" secs="$2" line
+    {
+        echo "repo-sync on $SELF -- $(date '+%a %b %-d %H:%M') -- $(plural "$count" repo) in ${secs}s"
+        if (( ${#ATTENTION[@]} )); then
+            echo "Needs attention:"
+            for line in "${ATTENTION[@]}"; do echo "  ! $line"; done
+        else
+            echo "Nothing needs attention."
+        fi
+        if (( ${#INFO[@]} )); then
+            echo "Info:"
+            for line in "${INFO[@]}"; do echo "  - $line"; done
+        fi
+    } > "$STATE_DIR/status.tmp"
+    mv "$STATE_DIR/status.tmp" "$STATE_DIR/status"
+    printf '%s\n' "${ATTENTION[@]}" | sed '/^$/d' > "$STATE_DIR/attention"
+}
+
+cmd_run() {
+    local log="$STATE_DIR/sync.log"
+    mkdir -p "$STATE_DIR"
+
+    exec 9>"$STATE_DIR/lock"
+    if ! flock -n 9; then
+        echo "repo-sync is already running"
+        return 0
+    fi
+
+    # Keep one generation of log
+    [[ -f "$log" && $(stat -c %s "$log") -gt 1048576 ]] && mv "$log" "$log.1"
+    sync_all 2>&1 | tee -a "$log"
+}
+
+sync_all() {
+    local d name count=0 start=$SECONDS
+    echo "===== $(date '+%F %T') repo-sync on $SELF ====="
+
+    if [[ ! -d "$ROOT" ]]; then
+        attention "$ROOT does not exist"
+    elif ! wait_for_network; then
+        attention "GitHub unreachable after 2 minutes -- nothing fetched"
+    else
+        for d in "$ROOT"/*/; do
+            d="${d%/}"; name="${d##*/}"
+            [[ -e "$d/.git" ]] || continue
+            [[ "$IGNORE" == *" $name "* ]] && continue
+            echo "  $name"
+            sync_repo "$d"
+            count=$((count + 1))
+        done
+        sync_peer
+    fi
+
+    write_status "$count" "$((SECONDS - start))"
+    echo
+    cat "$STATE_DIR/status"
+}
+
+#========== Status / log ==========
+cmd_status() {
+    if [[ "$1" == "--brief" ]]; then
+        [[ -s "$STATE_DIR/attention" ]] || return 0
+        echo "repo-sync -- needs attention (details: repo-sync status)"
+        sed 's/^/  ! /' "$STATE_DIR/attention"
+    elif [[ -f "$STATE_DIR/status" ]]; then
+        cat "$STATE_DIR/status"
+        echo
+        systemctl --user list-timers repo-sync.timer --no-pager 2>/dev/null | sed -n '1,2p'
+    else
+        echo "repo-sync has not run yet -- try: repo-sync run"
+    fi
+}
+
+cmd_log() { tail -n "${1:-60}" "$STATE_DIR/sync.log"; }
+
+#========== Install ==========
+cmd_install() {
+    local src
+    src="$(readlink -f "${BASH_SOURCE[0]}")"
+    mkdir -p "$HOME/.local/bin" "$UNIT_DIR" "$STATE_DIR"
+
+    # Symlink rather than copy, so pulling bash_stuff updates the command too
+    ln -sfn "$src" "$HOME/.local/bin/repo-sync"
+    echo "Linked ~/.local/bin/repo-sync -> $src"
+
+    cat > "$UNIT_DIR/repo-sync.service" <<EOF
+[Unit]
+Description=Sync git repos in ~/workspace with GitHub and the other machine
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/repo-sync run
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Nice=10
+TimeoutStartSec=30min
+EOF
+
+    cat > "$UNIT_DIR/repo-sync.timer" <<EOF
+[Unit]
+Description=Run repo-sync at startup and then hourly
+
+[Timer]
+OnStartupSec=30s
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now repo-sync.timer
+    echo "Enabled repo-sync.timer (30s after startup, then hourly)"
+
+    # Linger starts the user manager at boot instead of at first login
+    if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \
+        || loginctl enable-linger "$USER" 2>/dev/null; then
+        echo "Linger is on: the timer starts with the machine, no login needed"
+    else
+        echo "Could not enable linger; the timer will start at first login instead."
+        echo "  To start it at boot: sudo loginctl enable-linger $USER"
+    fi
+
+    if ! grep -qsF "$LOGIN_HOOK" "$LOCAL_PROFILE"; then
+        printf '\n# Show repos that need attention (written by repo-sync install)\n%s\n' "$LOGIN_HOOK" >> "$LOCAL_PROFILE"
+        echo "Added login summary to $LOCAL_PROFILE"
+    fi
+}
+
+cmd_uninstall() {
+    systemctl --user disable --now repo-sync.timer 2>/dev/null
+    rm -f "$UNIT_DIR/repo-sync.service" "$UNIT_DIR/repo-sync.timer" "$HOME/.local/bin/repo-sync"
+    systemctl --user daemon-reload
+    [[ -f "$LOCAL_PROFILE" ]] && sed -i '/repo-sync/d' "$LOCAL_PROFILE"
+    echo "Removed the timer, the command and the login summary (state kept in $STATE_DIR)"
+}
+
+main() {
+    case "${1:-run}" in
+        run)       cmd_run ;;
+        status)    cmd_status "$2" ;;
+        state)     emit_state "$ROOT" ;;
+        log)       cmd_log "$2" ;;
+        install)   cmd_install ;;
+        uninstall) cmd_uninstall ;;
+        *)         sed -n '3,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 1 ;;
+    esac
+}
+
+# Same line on purpose: this file can be fast-forwarded by its own run, and bash
+# must not go back to read more of it afterwards
+main "$@"; exit $?

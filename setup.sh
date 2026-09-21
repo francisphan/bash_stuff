@@ -107,6 +107,16 @@ if [[ ! -d "$CLAUDE_DIR" ]]; then
 fi
 install_dotfile "$SCRIPT_DIR/profiles/claude_settings.json" "$CLAUDE_DIR/settings.json" "Claude settings"
 
+#========== Repo Sync ==========
+echo ""
+print_info "repo-sync (keeps ~/workspace repos in sync between FPMoss and FPZeph)"
+RESP=$(get_choice "Install the repo-sync timer (runs at startup and hourly)? (y/n): " "yn")
+if [[ "$RESP" == "y" ]]; then
+    "$SCRIPT_DIR/bin/repo-sync" install && print_success "Installed repo-sync"
+else
+    print_info "Skipped repo-sync"
+fi
+
 #========== Done ==========
 echo ""
 echo "======================================"
