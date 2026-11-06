@@ -15,7 +15,10 @@
 #   repo-sync status       show the result of the last sync (--brief: only
 #                          what needs attention, silent when nothing does)
 #   repo-sync log          tail the log
-#   repo-sync install      install the systemd user timer (startup + hourly)
+#   repo-sync watch        sync now if the peer has just come online (run
+#                          every 2 minutes by repo-sync-watch.timer)
+#   repo-sync install      install the systemd user timers (startup + hourly,
+#                          and the 2-minute peer watch)
 #   repo-sync uninstall    remove it
 #
 # Optional overrides in ~/.config/repo-sync/config (sourced as bash):
@@ -262,6 +265,22 @@ sync_peer() {
     done
 }
 
+# Only a tailscale query, so it is cheap enough to run every couple of minutes.
+# The full sync runs on the offline -> online edge, not while the peer stays up.
+cmd_watch() {
+    local peer now was="" mark
+    peer=$(other_host)
+    mark="$STATE_DIR/peer-${peer,,}.online"
+    mkdir -p "$STATE_DIR"
+    peer_online_ip "$peer" >/dev/null && now=online || now=offline
+    [[ -f "$mark" ]] && was=$(<"$mark")
+    echo "$now" > "$mark"
+    if [[ "$now" == online && "$was" != online ]]; then
+        echo "$(date '+%F %T') $peer came online -- starting a sync" >> "$STATE_DIR/sync.log"
+        systemctl --user start --no-block repo-sync.service
+    fi
+}
+
 #========== Run ==========
 wait_for_network() {
     local i
@@ -382,9 +401,32 @@ OnUnitActiveSec=1h
 WantedBy=timers.target
 EOF
 
+    cat > "$UNIT_DIR/repo-sync-watch.service" <<EOF
+[Unit]
+Description=Start repo-sync when the other machine comes online
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/repo-sync watch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EOF
+
+    cat > "$UNIT_DIR/repo-sync-watch.timer" <<EOF
+[Unit]
+Description=Check every 2 minutes whether the other machine came online
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+
     systemctl --user daemon-reload
-    systemctl --user enable --now repo-sync.timer
+    systemctl --user enable --now repo-sync.timer repo-sync-watch.timer
     echo "Enabled repo-sync.timer (30s after startup, then hourly)"
+    echo "Enabled repo-sync-watch.timer (syncs within 2 minutes of the other machine coming online)"
 
     # Linger starts the user manager at boot instead of at first login
     if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == yes ]] \
@@ -402,8 +444,8 @@ EOF
 }
 
 cmd_uninstall() {
-    systemctl --user disable --now repo-sync.timer 2>/dev/null
-    rm -f "$UNIT_DIR/repo-sync.service" "$UNIT_DIR/repo-sync.timer" "$HOME/.local/bin/repo-sync"
+    systemctl --user disable --now repo-sync.timer repo-sync-watch.timer 2>/dev/null
+    rm -f "$UNIT_DIR"/repo-sync{,-watch}.{service,timer} "$HOME/.local/bin/repo-sync"
     systemctl --user daemon-reload
     [[ -f "$LOCAL_PROFILE" ]] && sed -i '/repo-sync/d' "$LOCAL_PROFILE"
     echo "Removed the timer, the command and the login summary (state kept in $STATE_DIR)"
@@ -413,11 +455,12 @@ main() {
     case "${1:-run}" in
         run)       cmd_run ;;
         status)    cmd_status "$2" ;;
+        watch)     cmd_watch ;;
         state)     emit_state "$ROOT" ;;
         log)       cmd_log "$2" ;;
         install)   cmd_install ;;
         uninstall) cmd_uninstall ;;
-        *)         sed -n '3,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 1 ;;
+        *)         sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 1 ;;
     esac
 }
 
